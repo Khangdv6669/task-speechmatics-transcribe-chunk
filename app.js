@@ -4,7 +4,8 @@ const kafka = require('kafka-node'),
     _ = require('lodash'),
     process = require('process'),
     path = require('path'),
-    config = require('config');
+    config = require('config'),
+    SpeechmaticsClient = require('./speechmatics-client');
 
 console.log(`Config loaded : ${JSON.stringify(config)}`);
 

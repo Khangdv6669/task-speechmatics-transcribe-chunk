@@ -1,7 +1,7 @@
 {
   "engineId": "098d9ec9-cf4d-466c-80a6-6d89c5e7c116",
   "kafka": {
-    "brokers": "127.0.0.1:9092",
+    "brokers": "localhost:9092",
     "topics": {
       "inputQueue": "chunk_in_92d060ad-bd1e-42a1-9ccf-a2d978e24e36",
       "chunkQueue": "chunk_all"
