@@ -7,5 +7,19 @@
       "chunkQueue": "chunk_all"
     },
     "consumerGroupId": "cg_chunk_in_92d060ad-bd1e-42a1-9ccf-a2d978e24e36"
+  },
+  "endIfIdleSecs": 900,
+  "speechmatics": {
+    "apiKey": "NjdiYjQ5OWEtMjk2Yy00YzhkLWFjOGItOTA3M2UyMTVjZTI0",
+    "userId": "44913",
+    "supportedInputs": {
+      "aac": true,
+      "aif": true,
+      "m4a": true,
+      "mov": true,
+      "mp3": true,
+      "mp4": true,
+      "wav": true
+    }
   }
 }
