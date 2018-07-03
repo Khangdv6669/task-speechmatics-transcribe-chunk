@@ -10,7 +10,7 @@ function TranscribeClient(config) {
     if(!config.apiKey || typeof config.apiKey !== 'string') {
         throw new Error('Missing or invalid apiKey');
     }
-    if(!config.supportedInputs || config.supportedInputs !== 'object') {
+    if(!config.supportedInputs || typeof config.supportedInputs !== 'object') {
         throw new Error('Missing or invalid supportedInputs');
     }
 
@@ -44,7 +44,7 @@ TranscribeClient.prototype.getTranscribeJobStatus = function getTranscribeJobSta
             return callback(new Error(`Invalid getJob status response got`));
         }
 
-        callback(null, resp.job_status);
+        callback(null, resp);
     });
 };
 

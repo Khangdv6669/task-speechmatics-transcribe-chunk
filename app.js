@@ -5,7 +5,12 @@ const kafka = require('kafka-node'),
     process = require('process'),
     path = require('path'),
     config = require('config'),
-    SpeechmaticsClient = require('./speechmatics-client');
+    fs = require('fs'),
+    sleep = require('system-sleep'),
+    KeyedMessage = kafka.KeyedMessage,
+    translator = require('./transcribe-translator'),
+    TranscribeClient = require('./transcribe-client');
+
 
 console.log(`Config loaded : ${JSON.stringify(config)}`);
 
@@ -15,9 +20,14 @@ const CHUNK_STATUS = {
   SUCCESS: 'SUCCESS'
 };
 
+var completeJob = false;
+var errorMes = '';
+var media = '';
+const transcribeClient = new TranscribeClient(config.speechmatics);
+
 // Start Idle timer
-console.log(`Started with config : ${config.enIfIdleSecs}`);
-let idleTimer = setTimeout(gracefulShutdown, config.enIfIdleSecs * 1000);
+console.log('Started with endIfIdleSecs config : '+ config.endIfIdleSecs);
+let idleTimer = setTimeout(gracefulShutdown, config.endIfIdleSecs * 1000);
 
 // config graceful shutdown handlers
 process.on('SIGINT',gracefulShutdown);
@@ -43,6 +53,20 @@ function gracefulShutdown() {
     console.log('Initializing graceful shutdown');
 
     const cleanUpResource = [];
+    if (consumerGroup)
+        cleanUpResource.push(Promise.promisify(consumerGroup.close));
+    if (producer)
+        cleanUpResource.push(Promise.promisify(producer.close));
+    if (client)
+        cleanUpResource.push(Promise.promisify(client.close));
+
+    Promise.all(cleanUpResource).then(res => {
+        console.log('Close all resources');
+        process.exit();
+    }).catch(err => {
+        console.log('Failed to close resource :', err);
+        process.exit();
+    });
 }
 
 producer.on('error', err =>{
@@ -72,9 +96,13 @@ function startQueueConsumption() {
         console.log('ConsumerGroup Error :', err);
     });
 
-    consumerGroup.on('message', message =>{
-        console.log('Message got :', message);
+    consumerGroup.on('message', message => {
+        let t = process.hrtime();
+        // Reset idle engine Timer
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(gracefulShutdown, config.endIfIdleSecs * 1000);
 
+        console.log('Message got :', message);
         const {value} = message;
         console.log(`Value got: ${value}`);
         let event;
@@ -93,19 +121,88 @@ function startQueueConsumption() {
             return;
         }
 
-        // try to createjob test
-        var opts = {
-            assetURI: event.cacheURI,
-            language: 'en-US'
-        };
-        const SpeechmaticsClient = new SpeechmaticsClient(config['speechmatics'].userIid, config['speechmatics'].apiKey,opts);
-        SpeechmaticsClient.createJob(opts, function createJobCallback(err, resp) {
-            if (err) {
-                return callback(err);
+        // check language value
+        if (typeof event.taskPayload === 'undefined' || typeof event.taskPayload.language === 'undefined') {
+            event.taskPayload = {
+                language: 'en-US'
+            };
+        }
+
+        (async () => {
+            try {
+                await transcribeClient.createTranscribeJob(event.cacheURI, event.taskPayload.language, function createTranscribeJobCallback(err, response) {
+                    if (err) {
+                        return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+                    }
+
+                    // get jobId
+                    var jobId = response.id;
+                    console.log('Jobid got:', jobId);
+                    var continueJob = true;
+                    while (continueJob) {
+                        sleep(20000);
+                        transcribeClient.getTranscribeJobStatus(jobId, function getTranscribeJobStatusCallback(err, res) {
+                            if (err) {
+                                errorMes = err;
+                                continueJob = false;
+                            } else {
+                                var jobStatus = res.job_status;
+                                console.log('Status got :', jobStatus);
+                                if (jobStatus === 'rejected' || jobStatus === 'unsupported_file_format' || jobStatus === 'could_not_align') {
+                                    errorMes = 'file could not be processed';
+                                    continueJob = false;
+                                }
+                                if (jobStatus === 'done') {
+                                    // get Transcript
+                                    transcribeClient.getTranscript(jobId, function getTranscriptCallback(err, transcript) {
+                                        if (err) {
+                                            errorMes = 'Could not get transcript';
+                                        } else {
+                                            //console.log('Transcript got :',transcript);
+                                            media = transcript;
+                                            completeJob = true;
+                                        }
+                                    });
+                                    continueJob = false;
+                                }
+                            }
+                        });
+                    }
+
+                    if (completeJob) {
+                        handleResponse(media, function handleResponseCallback(err, taskOutput) {
+                            if (err) {
+                                return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+                            }
+
+                            const engineOutput = Object.assign({
+                                type: 'engine_output',
+                                timestampUTC: Date.now(),
+                                outputType: 'object-series',
+                                mimeType: 'application/json',
+                                content: JSON.stringify({
+                                    series: [taskOutput]
+                                }),
+                                rev: 1
+                            }, _.pick(event, ['taskId', 'tdoId', 'jobId', 'startOffsetMs', 'endOffsetMs', 'taskPayload', 'chunkUUID']));
+                            console.log(`${event.taskId} Sending the engine output... `);
+                            console.log(`${event.taskId} Engine output: ${JSON.stringify(engineOutput)}`);
+
+
+                            // Send successful chunk processed messages
+                            return sendChunkProcessed(event, CHUNK_STATUS.SUCCESS, null, t);
+                        });
+                    } else {
+                        return sendChunkProcessed(event, CHUNK_STATUS.ERROR, errorMes, t);
+                    }
+                });
+
+            } catch (e) {
+                console.log('Exception :',e);
+                sendChunkProcessed(event, CHUNK_STATUS.ERROR, e, t);
+                process.exit(1);
             }
-            console.log(resp)
-            //callback(null, resp);
-        });
+        })();
     });
 };
 
@@ -142,6 +239,57 @@ function sendChunkProcessed(event, status, mess, processTime) {
     if (processTime === undefined || processTime === null) {
         t = process.hrtime();
     }
+
+    const chunkStatus = {
+        type: 'chunk_processed_status',
+        timestampUTC: Date.now(),
+        taskId: event.taskId,
+        chunkUUID: event.chunkUUID,
+        status: status
+    };
+
+    if(mess) {
+        console.log(mess);
+        if (status === CHUNK_STATUS.SUCCESS || status === CHUNK_STATUS.IGNORED) {
+            chunkStatus.infoMsg = _.isEmpty(mess) ? null : mess
+        } else {
+            chunkStatus.errorMsg = _.isEmpty(mess) ? null : mess
+        }
+    }
+
+    console.log(`(TaskID: ${event.taskId}) Sending a chunk_processed_status to kafka: ${JSON.stringify(chunkStatus)}`);
+
+    producer.send([{
+        topic: config.kafka.topics.chunkQueue,
+        messages: [
+            new KeyedMessage(event.taskId, JSON.stringify(chunkStatus))
+        ]
+    }], (err, data) => {
+        t = process.hrtime(t);
+        if (err) {
+            console.log(`(TaskID: ${event.taskId}) [chunk_processed_status] Failed to produce status to kafka: ${err}`);
+            console.log(`(TaskID: ${event.taskId}) Total time elapsed: ${t[0]}s ${t[1]}ns`);
+
+            return;
+        }
+
+        console.log(`(TaskID: ${event.taskId}) [chunk_processed_status] Produced status message: ${JSON.stringify(data)}`);
+        console.log(`(TaskID: ${event.taskId}) Total time elapsed: ${t[0]}s ${t[1]}ns`);
+    });
 }
+
+function handleResponse(res, callback) {
+    console.log(`Saving transcript to asset`);
+    const vlf = translator.latticeToVLF(res);
+    vlf.forEach(function (v) {
+       v.words.forEach(function (w) {
+          w.bestPath = true;
+          w.utteranceLength = 1;
+       });
+    });
+    callback(null, vlf);
+}
+
+
 
 

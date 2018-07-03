@@ -25,7 +25,7 @@ SpeechmaticsClient.prototype.makeRequest = function makeRequest(method , path, o
     newOpts.json = true;
     newOpts.headers = this.headers;
     newOpts.baseUrl = this.baseUrl;
-    newOpts.url = '/v' + this.version + '/' + path;
+    newOpts.url = '/v' + this.apiVersion + '/' + path;
     newOpts.qs = {};
     newOpts.qs.auth_token = this.apiToken;
     console.log(`New Options get : ${JSON.stringify(newOpts)}`);
