@@ -14,7 +14,7 @@ function convertTranscriptionResponseToVLF(transcript) {
     transcript.forEach(function eachTranscriptionWord(word) {
         var vlfWord = {
             word: word.name,
-            confidence: Math.round(word.confidence * 1000),
+            confidence: parseFloat(word.confidence),
             bestPathForward: true,
             bestPathBackward: true,
             spanningForward: false,

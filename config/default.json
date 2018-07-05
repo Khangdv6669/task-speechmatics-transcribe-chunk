@@ -10,8 +10,8 @@
   },
   "endIfIdleSecs": 900,
   "speechmatics": {
-    "apiKey": "NjdiYjQ5OWEtMjk2Yy00YzhkLWFjOGItOTA3M2UyMTVjZTI0",
-    "userId": "44913",
+    "apiKey": "ZWRjMWYzZTAtZTNlMC00NGRkLWI1NTgtZDZiNDg2YzYzZWJm",
+    "userId": "46124",
     "supportedInputs": {
       "aac": true,
       "aif": true,

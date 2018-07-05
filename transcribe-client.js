@@ -25,6 +25,7 @@ TranscribeClient.prototype.createTranscribeJob = function createTranscribeJob(as
         assetURI: assetURI,
         language: language
     };
+    console.log(this._client);
     this._client.createJob(opts, function createJobCallback(err, resp) {
         if (err) {
            return callback(err);

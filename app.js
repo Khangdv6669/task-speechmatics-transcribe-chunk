@@ -5,9 +5,9 @@ const kafka = require('kafka-node'),
     process = require('process'),
     path = require('path'),
     config = require('config'),
-    fs = require('fs'),
     sleep = require('system-sleep'),
     KeyedMessage = kafka.KeyedMessage,
+    Promise = require('bluebird'),
     translator = require('./transcribe-translator'),
     TranscribeClient = require('./transcribe-client');
 
@@ -44,10 +44,10 @@ const client = new kafka.KafkaClient(
     }
 );
 const producer = new kafka.HighLevelProducer(client,
-        {
-            partitionerType: 3
-        }
-    );
+    {
+        partitionerType: 3
+    }
+);
 
 function gracefulShutdown() {
     console.log('Initializing graceful shutdown');
@@ -130,73 +130,89 @@ function startQueueConsumption() {
 
         (async () => {
             try {
-                await transcribeClient.createTranscribeJob(event.cacheURI, event.taskPayload.language, function createTranscribeJobCallback(err, response) {
-                    if (err) {
-                        return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
-                    }
-
-                    // get jobId
-                    var jobId = response.id;
-                    console.log('Jobid got:', jobId);
-                    var continueJob = true;
-                    while (continueJob) {
-                        sleep(20000);
-                        transcribeClient.getTranscribeJobStatus(jobId, function getTranscribeJobStatusCallback(err, res) {
-                            if (err) {
-                                errorMes = err;
-                                continueJob = false;
-                            } else {
-                                var jobStatus = res.job_status;
-                                console.log('Status got :', jobStatus);
-                                if (jobStatus === 'rejected' || jobStatus === 'unsupported_file_format' || jobStatus === 'could_not_align') {
-                                    errorMes = 'file could not be processed';
-                                    continueJob = false;
-                                }
-                                if (jobStatus === 'done') {
-                                    // get Transcript
-                                    transcribeClient.getTranscript(jobId, function getTranscriptCallback(err, transcript) {
-                                        if (err) {
-                                            errorMes = 'Could not get transcript';
-                                        } else {
-                                            //console.log('Transcript got :',transcript);
-                                            media = transcript;
-                                            completeJob = true;
-                                        }
-                                    });
-                                    continueJob = false;
-                                }
-                            }
-                        });
-                    }
-
-                    if (completeJob) {
-                        handleResponse(media, function handleResponseCallback(err, taskOutput) {
-                            if (err) {
-                                return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
-                            }
-
-                            const engineOutput = Object.assign({
-                                type: 'engine_output',
-                                timestampUTC: Date.now(),
-                                outputType: 'object-series',
-                                mimeType: 'application/json',
-                                content: JSON.stringify({
-                                    series: [taskOutput]
-                                }),
-                                rev: 1
-                            }, _.pick(event, ['taskId', 'tdoId', 'jobId', 'startOffsetMs', 'endOffsetMs', 'taskPayload', 'chunkUUID']));
-                            console.log(`${event.taskId} Sending the engine output... `);
-                            console.log(`${event.taskId} Engine output: ${JSON.stringify(engineOutput)}`);
-
-
-                            // Send successful chunk processed messages
-                            return sendChunkProcessed(event, CHUNK_STATUS.SUCCESS, null, t);
-                        });
-                    } else {
-                        return sendChunkProcessed(event, CHUNK_STATUS.ERROR, errorMes, t);
-                    }
+                const createTranscribeJobPromised = Promise.promisify(
+                    transcribeClient.createTranscribeJob,
+                    {context: transcribeClient}
+                );
+                let response = await createTranscribeJobPromised(event.cacheURI, event.taskPayload.language).catch(err => {
+                    return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
                 });
 
+                var jobId = response.id;
+                console.log('Jobid got:', jobId);
+                var continueJob = true;
+
+                while (continueJob) {
+                    sleep(20000);
+                    const getTranscribeJobStatusPromised = Promise.promisify(
+                        transcribeClient.getTranscribeJobStatus,
+                        {context: transcribeClient}
+                    );
+                    let res = await getTranscribeJobStatusPromised(jobId).catch(err => {
+                        errorMes = err;
+                        continueJob = false;
+                    });
+
+                    var jobStatus = res.job_status;
+                    console.log('Status got :', jobStatus);
+                    if (jobStatus === 'rejected' || jobStatus === 'unsupported_file_format' || jobStatus === 'could_not_align') {
+                        errorMes = 'file could not be processed';
+                        continueJob = false;
+                    }
+                    if (jobStatus === 'done') {
+                        const getTranscriptPromised = Promise.promisify(
+                            transcribeClient.getTranscript,
+                            {context: transcribeClient}
+                        );
+                        let transcript = await getTranscriptPromised(jobId).catch(err => {
+                            errorMes = err;
+                            continueJob = false;
+                        });
+
+                        media = transcript;
+                        completeJob = true;
+                        continueJob = false;
+                    }
+                }
+
+                if (completeJob) {
+                    handleResponse(media, function handleResponseCallback(err, taskOutput) {
+                        if (err) {
+                            return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+                        }
+
+                        const engineOutput = Object.assign({
+                            type: 'engine_output',
+                            timestampUTC: Date.now(),
+                            outputType: 'object-series',
+                            mimeType: 'application/json',
+                            content: JSON.stringify({
+                                series: [taskOutput]
+                            }),
+                            rev: 1
+                        }, _.pick(event, ['taskId', 'tdoId', 'jobId', 'startOffsetMs', 'endOffsetMs', 'taskPayload', 'chunkUUID']));
+                        console.log(`${event.taskId} Sending the engine output... `);
+                        console.log(`${event.taskId} Engine output: ${JSON.stringify(engineOutput)}`);
+
+                        producer.send([{
+                            topic: config.kafka.topics.chunkQueue,
+                            messages: [
+                                new KeyedMessage(event.taskId, JSON.stringify(engineOutput))
+                            ]
+                        }], (err, data) => {
+                            if (err) {
+                                console.log(`${event.taskId} [engine_output] Failed to produce series to kafka: ` + err);
+
+                                return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+                            }
+                            console.log(`${event.taskId} >> sent - [engine_output] Produced message: ${JSON.stringify(data)}`);
+                        });
+                        // Send successful chunk processed messages
+                        return sendChunkProcessed(event, CHUNK_STATUS.SUCCESS, null, t);
+                    });
+                } else {
+                    return sendChunkProcessed(event, CHUNK_STATUS.ERROR, errorMes, t);
+                }
             } catch (e) {
                 console.log('Exception :',e);
                 sendChunkProcessed(event, CHUNK_STATUS.ERROR, e, t);
