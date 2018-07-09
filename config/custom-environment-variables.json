@@ -1,0 +1,13 @@
+{
+  "engineId": "ENGINE_ID",
+  "engineInstanceId": "ENGINE_INSTANCE_ID",
+  "kafka": {
+    "brokers": "KAFKA_BROKERS",
+    "topics": {
+      "inputQueue": "KAFKA_INPUT_TOPIC",
+      "chunkQueue": "KAFKA_CHUNK_TOPIC"
+    },
+    "consumerGroupId": "KAFKA_CONSUMER_GROUP"
+  },
+  "endIfIdleSecs": "END_IF_IDLE_SECS"
+}

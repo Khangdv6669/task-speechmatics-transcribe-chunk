@@ -117,7 +117,9 @@ function startQueueConsumption() {
         // validate kafka message
         const error = validateEvent(event);
         if (!_.isEmpty(error)) {
-            sendChunkProcessed(event, CHUNK_STATUS.IGNORED, warnings.join(','), t);
+            sendChunkProcessed(event, CHUNK_STATUS.IGNORED, error.join(','), t);
+            t = process.hrtime(t);
+            console.log(`Time elapsed: ${t[0]}s ${t[1]}ns`);
             return;
         }
 

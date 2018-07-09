@@ -1,0 +1,18 @@
+{
+  "engineId": "f1bf71b5-c525-433a-957a-14d5ed4ff6ad",
+  "engineMode":"chunk",
+  "url": "https://github.com/Khangdv6669/task-speechmatics-transcribe-chunk.git",
+  "category": "transcription",
+  "externalCalls": [],
+  "preferredInputFormat": "audio/wav",
+  "supportedInputFormats":[
+    "video/mp4",
+    "audio/wav"
+  ],
+  "outputFormats": [
+    "application/json"
+  ],
+  "clusterSize": "small",
+  "intialConcurrency": 50,
+  "maxConcurrency": 50
+}
