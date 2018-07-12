@@ -139,8 +139,9 @@ function startQueueConsumption() {
 				var jobId = response.id;
 				console.log('Jobid got:', jobId);
 				var continueJob = true;
+				var count = 0;
 
-				while (continueJob) {
+				while (continueJob && (count < 3)) {
 					sleep(20000);
 					const getTranscribeJobStatusPromised = Promise.promisify(
 						transcribeClient.getTranscribeJobStatus,
@@ -171,6 +172,7 @@ function startQueueConsumption() {
 						completeJob = true;
 						continueJob = false;
 					}
+					count++;
 				}
 
 				if (completeJob) {
@@ -185,7 +187,7 @@ function startQueueConsumption() {
 							outputType: 'object-series',
 							mimeType: 'application/json',
 							content: JSON.stringify({
-								series: [taskOutput]
+								series: taskOutput
 							}),
 							rev: 1
 						}, _.pick(event, ['taskId', 'tdoId', 'jobId', 'startOffsetMs', 'endOffsetMs', 'taskPayload', 'chunkUUID']));
@@ -293,11 +295,13 @@ function sendChunkProcessed(event, status, mess, processTime) {
 function handleResponse(res, callback) {
 	console.log(`Saving transcript to asset`);
 	const vlf = translator.latticeToVLF(res);
+	const result = [];
 	vlf.forEach(function (v) {
 		v.words.forEach(function (w) {
 			w.bestPath = true;
 			w.utteranceLength = 1;
 		});
+		result.push(v);
 	});
-	callback(null, vlf);
+	callback(null, result);
 }
