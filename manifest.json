@@ -6,8 +6,11 @@
   "externalCalls": [],
   "preferredInputFormat": "audio/wav",
   "supportedInputFormats":[
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/wav",
     "video/mp4",
-    "audio/wav"
+    "video/mpeg"
   ],
   "outputFormats": [
     "application/json"

@@ -42,11 +42,7 @@ const client = new kafka.KafkaClient(
 		kafkaHost: config.kafka.brokers
 	}
 );
-const producer = new kafka.HighLevelProducer(client,
-	{
-		partitionerType: 3
-	}
-);
+const producer = new kafka.HighLevelProducer(client);
 
 function gracefulShutdown() {
 	console.log('Initializing graceful shutdown');
@@ -141,7 +137,8 @@ function startQueueConsumption() {
 				var continueJob = true;
 				var count = 0;
 
-				while (continueJob && (count < 3)) {
+				while (continueJob && (count < 10)) {
+					console.log('Count :', count);
 					sleep(20000);
 					const getTranscribeJobStatusPromised = Promise.promisify(
 						transcribeClient.getTranscribeJobStatus,
