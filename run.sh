@@ -1,3 +1,3 @@
-#!/bin/sh
+#!/bin/bash
 
-node app.js
+./toolkit/engine node app.js

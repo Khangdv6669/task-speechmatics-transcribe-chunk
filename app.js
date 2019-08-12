@@ -1,139 +1,80 @@
 'use strict'
 
-const kafka = require('kafka-node'),
-	_ = require('lodash'),
-	process = require('process'),
+const _ = require('lodash'),
 	path = require('path'),
 	config = require('config'),
 	sleep = require('system-sleep'),
-	KeyedMessage = kafka.KeyedMessage,
 	Promise = require('bluebird'),
+	express = require('express'),
+	multer = require('multer'),
 	translator = require('./transcribe-translator'),
 	TranscribeClient = require('./transcribe-client');
 
 console.log(`Config loaded : ${JSON.stringify(config)}`);
-
-const CHUNK_STATUS = {
-	ERROR: 'ERROR',
-	IGNORED: 'IGNORED',
-	SUCCESS: 'SUCCESS'
-};
 
 var completeJob = false;
 var errorMes = '';
 var media = '';
 const transcribeClient = new TranscribeClient(config.speechmatics);
 
-// Start Idle timer
-console.log('Started with endIfIdleSecs config : ' + config.endIfIdleSecs);
-let idleTimer = setTimeout(gracefulShutdown, config.endIfIdleSecs * 1000);
+server();
 
-// config graceful shutdown handlers
-process.on('SIGINT', gracefulShutdown);
-process.on('SIGTERM', gracefulShutdown);
+function server() {
+	const app = express();
+	const upload = multer({storage: multer.memoryStorage()});
+	app.listen(8080);
 
-console.log(`Initializing kafka client with Broker : ${config.kafka.brokers}
-            , ChunkTopic : ${config.kafka.topics.chunkQueue}
-            , InputTopic : ${config.kafka.topics.inputQueue}
-            , ConsumerGroup : ${config.kafka.consumerGroupId}`);
-
-const client = new kafka.KafkaClient(
-	{
-		kafkaHost: config.kafka.brokers
-	}
-);
-const producer = new kafka.HighLevelProducer(client,
-	{
-		partitionerType: 3
-	}
-);
-
-function gracefulShutdown() {
-	console.log('Initializing graceful shutdown');
-
-	const cleanUpResource = [];
-	if (consumerGroup) { cleanUpResource.push(Promise.promisify(consumerGroup.close)); }
-	if (producer) { cleanUpResource.push(Promise.promisify(producer.close)); }
-	if (client) { cleanUpResource.push(Promise.promisify(client.close)); }
-
-	Promise.all(cleanUpResource).then(res => {
-		console.log('Close all resources');
-		process.exit();
-	}).catch(err => {
-		console.log('Failed to close resource :', err);
-		process.exit();
+	app.get('/readyz', (req, res) => {
+		res.status(200).send('OK');
 	});
+
+	app.post('/process', upload.single('chunk'), async (req, res) => {
+		console.log('Engine start processing');
+		let chunk_data = req.body;
+		try {
+			let series = [];
+			await run(chunk_data).then((series) => {
+				console.log(`Final series: ${JSON.stringify(series)}`);
+				res.status(200);
+				return res.send({series: series});
+			},(err) => {
+				console.log(JSON.stringify(err));
+				res.status(500);
+				return res.send(err.data);
+			})
+		} catch (e) {
+			console.log(JSON.stringify(e.data));
+			res.status(500);
+			return res.send(e.data);
+		}
+	});
+
+	return app;
 }
 
-producer.on('error', err => {
-	console.log('Producer error :', err);
-	gracefulShutdown();
-});
-
-producer.on('ready', () => {
-	console.log('Producer connected to kafka server');
-	startQueueConsumption();
-});
-
-let consumerGroup;
-function startQueueConsumption() {
-	consumerGroup = new kafka.ConsumerGroup(
-		{
-			kafkaHost: config.kafka.brokers,
-			groupId: config.kafka.consumerGroupId,
-			protocol: ['roundrobin'],
-			fromOffset: 'earliest',
-			maxAsyncRequests: 10
-		},
-		config.kafka.topics.inputQueue
-	);
-
-	consumerGroup.on('error', err => {
-		console.log('ConsumerGroup Error :', err);
-	});
-
-	consumerGroup.on('message', message => {
-		let t = process.hrtime();
-		// Reset idle engine Timer
-		clearTimeout(idleTimer);
-		idleTimer = setTimeout(gracefulShutdown, config.endIfIdleSecs * 1000);
-
+function run(message) {
+	return new Promise((resolve, reject) => {
 		console.log('Message got :', message);
-		const {value} = message;
-		console.log(`Value got: ${value}`);
-		let event;
-		try {
-			event = JSON.parse(value);
-			console.log('Event got: ', event);
-		} catch (e) {
-			console.log('Failed to json unmarshal:' + value);
-			return;
-		}
-
 		// validate kafka message
-		const error = validateEvent(event);
+		const error = validateEvent(message);
 		if (!_.isEmpty(error)) {
-			sendChunkProcessed(event, CHUNK_STATUS.IGNORED, error.join(','), t);
-			t = process.hrtime(t);
-			console.log(`Time elapsed: ${t[0]}s ${t[1]}ns`);
-			return;
+			return reject(error);
 		}
 
 		// check language value
-		if (typeof event.taskPayload === 'undefined' || typeof event.taskPayload.language === 'undefined') {
-			event.taskPayload = {
+		if (typeof message.taskPayload === 'undefined' || typeof message.taskPayload.language === 'undefined') {
+			message.taskPayload = {
 				language: 'en-US'
 			};
 		}
-
 		(async () => {
 			try {
 				const createTranscribeJobPromised = Promise.promisify(
 					transcribeClient.createTranscribeJob,
 					{context: transcribeClient}
 				);
-				let response = await createTranscribeJobPromised(event.cacheURI, event.taskPayload.language).catch(err => {
-					return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+				let response = await createTranscribeJobPromised(message.cacheURI, message.taskPayload.language).catch(err => {
+					return reject(err);
 				});
 
 				var jobId = response.id;
@@ -141,14 +82,14 @@ function startQueueConsumption() {
 				var continueJob = true;
 				var count = 0;
 
-				while (continueJob && (count < 3)) {
-					sleep(20000);
+				while (continueJob && (count < 10)) {
+					sleep(10000);
 					const getTranscribeJobStatusPromised = Promise.promisify(
 						transcribeClient.getTranscribeJobStatus,
 						{context: transcribeClient}
 					);
 					let res = await getTranscribeJobStatusPromised(jobId).catch(err => {
-						errorMes = err;
+						errorMes = JSON.stringify(err);
 						continueJob = false;
 					});
 
@@ -164,7 +105,7 @@ function startQueueConsumption() {
 							{context: transcribeClient}
 						);
 						let transcript = await getTranscriptPromised(jobId).catch(err => {
-							errorMes = err;
+							errorMes = JSON.stringify(err);
 							continueJob = false;
 						});
 
@@ -178,44 +119,15 @@ function startQueueConsumption() {
 				if (completeJob) {
 					handleResponse(media, function handleResponseCallback(err, taskOutput) {
 						if (err) {
-							return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
+							return reject(err);
 						}
-
-						const engineOutput = Object.assign({
-							type: 'engine_output',
-							timestampUTC: Date.now(),
-							outputType: 'object-series',
-							mimeType: 'application/json',
-							content: JSON.stringify({
-								series: taskOutput
-							}),
-							rev: 1
-						}, _.pick(event, ['taskId', 'tdoId', 'jobId', 'startOffsetMs', 'endOffsetMs', 'taskPayload', 'chunkUUID']));
-						console.log(`${event.taskId} Sending the engine output... `);
-						console.log(`${event.taskId} Engine output: ${JSON.stringify(engineOutput)}`);
-
-						producer.send([{
-							topic: config.kafka.topics.chunkQueue,
-							messages: [
-								new KeyedMessage(event.taskId, JSON.stringify(engineOutput))
-							]
-						}], (err, data) => {
-							if (err) {
-								console.log(`${event.taskId} [engine_output] Failed to produce series to kafka: ` + err);
-								return sendChunkProcessed(event, CHUNK_STATUS.ERROR, err, t);
-							}
-							console.log(`${event.taskId} >> sent - [engine_output] Produced message: ${JSON.stringify(data)}`);
-						});
-						// Send successful chunk processed messages
-						return sendChunkProcessed(event, CHUNK_STATUS.SUCCESS, null, t);
+						resolve(taskOutput);
 					});
 				} else {
-					return sendChunkProcessed(event, CHUNK_STATUS.ERROR, errorMes, t);
+					return reject(new Error(errorMes));
 				}
 			} catch (e) {
-				console.log('Exception :', e);
-				sendChunkProcessed(event, CHUNK_STATUS.ERROR, e, t);
-				process.exit(1);
+				return reject(e);
 			}
 		})();
 	});
@@ -227,12 +139,6 @@ function startQueueConsumption() {
 
 function validateEvent(event) {
 	let errs = [];
-	if (event.type !== 'media_chunk') {
-		errs.push(`Engine Type was not media_chunk`);
-	} else {
-		console.log(`It was chunk engine`);
-	}
-	console.log(event.type);
 	console.log(event.cacheURI);
 	let fileType = path.extname(event.cacheURI).substring(1).toLowerCase();
 	console.log(`File type :${fileType} and supported  :${config.speechmatics.supportedInputs[fileType]}`);
@@ -240,56 +146,6 @@ function validateEvent(event) {
 		errs.push(`File type was not supprot`);
 	}
 	return errs;
-}
-
-/**
- * Send chunk process status
- */
-
-function sendChunkProcessed(event, status, mess, processTime) {
-	if (mess) {}
-
-	let t = processTime;
-	if (processTime === undefined || processTime === null) {
-		t = process.hrtime();
-	}
-
-	const chunkStatus = {
-		type: 'chunk_processed_status',
-		timestampUTC: Date.now(),
-		taskId: event.taskId,
-		chunkUUID: event.chunkUUID,
-		status: status
-	};
-
-	if (mess) {
-		console.log(mess);
-		if (status === CHUNK_STATUS.SUCCESS || status === CHUNK_STATUS.IGNORED) {
-			chunkStatus.infoMsg = _.isEmpty(mess) ? null : mess
-		} else {
-			chunkStatus.errorMsg = _.isEmpty(mess) ? null : mess
-		}
-	}
-
-	console.log(`(TaskID: ${event.taskId}) Sending a chunk_processed_status to kafka: ${JSON.stringify(chunkStatus)}`);
-
-	producer.send([{
-		topic: config.kafka.topics.chunkQueue,
-		messages: [
-			new KeyedMessage(event.taskId, JSON.stringify(chunkStatus))
-		]
-	}], (err, data) => {
-		t = process.hrtime(t);
-		if (err) {
-			console.log(`(TaskID: ${event.taskId}) [chunk_processed_status] Failed to produce status to kafka: ${err}`);
-			console.log(`(TaskID: ${event.taskId}) Total time elapsed: ${t[0]}s ${t[1]}ns`);
-
-			return;
-		}
-
-		console.log(`(TaskID: ${event.taskId}) [chunk_processed_status] Produced status message: ${JSON.stringify(data)}`);
-		console.log(`(TaskID: ${event.taskId}) Total time elapsed: ${t[0]}s ${t[1]}ns`);
-	});
 }
 
 function handleResponse(res, callback) {
